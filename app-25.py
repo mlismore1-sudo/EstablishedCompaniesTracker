@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import List, Dict, Optional
 import time
 import pandas as pd
+from difflib import SequenceMatcher
 
 # Configuration - Only 1 API key needed (Companies House)
 COMPANIES_HOUSE_API_KEY = os.getenv("COMPANIES_HOUSE_API_KEY")
@@ -18,7 +19,7 @@ st.set_page_config(page_title="UK Company Finder", layout="wide")
 
 # Title
 st.title("UK Company Finder")
-st.markdown("Find UK companies by SIC code and importer status - 100% free")
+st.markdown("Find UK companies by SIC code - filter by importer status")
 
 # Sidebar
 with st.sidebar:
@@ -48,9 +49,9 @@ with st.sidebar:
     )
     
     check_importer = st.checkbox(
-        label="Must be UK Trade importer",
-        value=True,
-        help="Cross-reference against HMRC importer database"
+        label="Show only importers",
+        value=False,
+        help="Filter to only companies confirmed as importers in HMRC data"
     )
     
     max_results = st.slider(
@@ -68,6 +69,71 @@ def get_ch_session():
     session = requests.Session()
     session.auth = (COMPANIES_HOUSE_API_KEY, "")
     return session
+
+def normalize_company_name(name: str) -> str:
+    """
+    Normalize company name for flexible matching
+    Removes common suffixes and standardizes format
+    """
+    if not name:
+        return ""
+    
+    # Convert to uppercase and strip
+    name = name.upper().strip()
+    
+    # Remove common suffixes
+    suffixes = [
+        " LIMITED", " LTD", " PLC", " LLP", " CIC",
+        " AND COMPANY", " & COMPANY", " AND CO", " & CO",
+        " HOLDINGS", " GROUP", " UK", " GB"
+    ]
+    
+    for suffix in suffixes:
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
+    
+    # Remove punctuation and extra spaces
+    name = name.replace("&", "AND").replace(".", "").replace(",", "").replace("-", " ")
+    name = " ".join(name.split())  # Remove extra spaces
+    
+    return name
+
+def fuzzy_match_names(name1: str, name2: str, threshold: float = 0.7) -> bool:
+    """
+    Fuzzy match two company names using multiple strategies
+    Returns True if names are similar enough
+    """
+    if not name1 or not name2:
+        return False
+    
+    # Normalize both names
+    norm1 = normalize_company_name(name1)
+    norm2 = normalize_company_name(name2)
+    
+    # Exact match after normalization
+    if norm1 == norm2:
+        return True
+    
+    # Check if one contains the other
+    if norm1 in norm2 or norm2 in norm1:
+        return True
+    
+    # Check word overlap (at least 50% of words match)
+    words1 = set(norm1.split())
+    words2 = set(norm2.split())
+    
+    if len(words1) > 0 and len(words2) > 0:
+        overlap = len(words1 & words2)
+        min_words = min(len(words1), len(words2))
+        if overlap / min_words >= 0.5:
+            return True
+    
+    # Sequence matching (fuzzy string similarity)
+    ratio = SequenceMatcher(None, norm1, norm2).ratio()
+    if ratio >= threshold:
+        return True
+    
+    return False
 
 def search_companies_by_sic(
     sic_code: str,
@@ -103,25 +169,20 @@ def search_companies_by_sic(
         st.error(f"Companies House API error: {e}")
         return []
 
-def check_uk_trade_importer_api(company_name: str, postcode: str = None) -> bool:
+def check_uk_trade_importer_api(company_name: str, postcode: str = None) -> tuple[bool, Optional[Dict]]:
     """
     Check if company appears as importer via UK Trade Info API
-    OPEN ACCESS - No API key required!
-    
-    Uses the /Trader endpoint with OData filter to find traders with import activity
-    API docs: https://www.uktradeinfo.com/api-documentation
+    Returns: (is_importer, trader_data)
     """
     if not company_name or not isinstance(company_name, str):
-        return False
+        return False, None
     
     session = requests.Session()
     
-    # Clean company name for matching
-    company_name_clean = company_name.upper().replace(" LIMITED", "").replace(" LTD", "").replace(" PLC", "").strip()
+    # Normalize company name for searching
+    company_name_clean = normalize_company_name(company_name)
     
-    # Try multiple search strategies
-    
-    # Strategy 1: Search by company name with contains filter
+    # Strategy 1: Search by exact company name
     filter_query = f"contains(tolower(Name), '{company_name_clean.lower()}')"
     
     try:
@@ -129,8 +190,8 @@ def check_uk_trade_importer_api(company_name: str, postcode: str = None) -> bool
             f"{UK_TRADE_BASE}/Trader",
             params={
                 "$filter": filter_query,
-                "$select": "Name,PostCode,ImportEntries,ExportEntries",
-                "$top": 20
+                "$select": "Name,PostCode,ImportEntries,ExportEntries,CommodityCode,HS2Description",
+                "$top": 50
             },
             timeout=15
         )
@@ -139,23 +200,48 @@ def check_uk_trade_importer_api(company_name: str, postcode: str = None) -> bool
             data = response.json()
             traders = data.get("value", [])
             
-            # Check if any matching trader has import activity
+            # Check each trader for import activity and name match
             for trader in traders:
                 import_entries = trader.get("ImportEntries", 0)
                 trader_name = trader.get("Name", "")
                 
+                # Check if trader has import activity
                 if import_entries and import_entries > 0:
-                    # Additional check: make sure names are similar
-                    trader_name_clean = trader_name.upper().replace(" LIMITED", "").replace(" LTD", "").replace(" PLC", "").strip()
+                    # Use fuzzy matching
+                    if fuzzy_match_names(company_name, trader_name, threshold=0.6):
+                        return True, trader
+            
+            # Strategy 2: If no exact match, try partial name (first 3 words)
+            if len(company_name_clean.split()) >= 3:
+                partial_name = " ".join(company_name_clean.split()[:3])
+                filter_query2 = f"contains(tolower(Name), '{partial_name.lower()}')"
+                
+                response2 = session.get(
+                    f"{UK_TRADE_BASE}/Trader",
+                    params={
+                        "$filter": filter_query2,
+                        "$select": "Name,PostCode,ImportEntries,ExportEntries",
+                        "$top": 50
+                    },
+                    timeout=15
+                )
+                
+                if response2.status_code == 200:
+                    data2 = response2.json()
+                    traders2 = data2.get("value", [])
                     
-                    # Simple string matching
-                    if company_name_clean in trader_name_clean or trader_name_clean in company_name_clean:
-                        return True
+                    for trader in traders2:
+                        import_entries = trader.get("ImportEntries", 0)
+                        trader_name = trader.get("Name", "")
+                        
+                        if import_entries and import_entries > 0:
+                            if fuzzy_match_names(company_name, trader_name, threshold=0.6):
+                                return True, trader
             
     except requests.exceptions.RequestException as e:
         st.warning(f"UK Trade API error: {e}")
     
-    return False
+    return False, None
 
 def get_company_profile_ch(company_number: str) -> Optional[Dict]:
     session = get_ch_session()
@@ -201,88 +287,65 @@ if start_search:
     
     st.success(f"Found {len(companies)} companies")
     
-    # Step 2: Check UK Trade importer status
-    if check_importer:
-        st.subheader("Step 2: Checking Importer Status")
-        st.info("Using UK Trade Info API (open access)")
-        
-        importer_filtered = []
-        non_importers = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for i, company in enumerate(companies):
-            company_number = company.get("company_number")
-            company_name = company.get("title")
-            
-            # Skip if no company name
-            if not company_name:
-                continue
-            
-            status_text.text(f"Checking {i+1}/{len(companies)}: {company_name}")
-            
-            profile = get_company_profile_ch(company_number)
-            
-            if profile:
-                address = profile.get("registered_office_address", {})
-                postcode = address.get("postal_code", "")
-                
-                is_importer = check_uk_trade_importer_api(company_name, postcode)
-                
-                if is_importer:
-                    importer_filtered.append({
-                        "company_number": company_number,
-                        "company_name": company_name,
-                        "profile": profile
-                    })
-                else:
-                    non_importers.append(company_name)
-            
-            progress_bar.progress((i + 1) / len(companies))
-            time.sleep(0.05)  # Faster rate limiting
-        
-        progress_bar.empty()
-        status_text.empty()
-        final_companies = importer_filtered
-        st.success(f"{len(final_companies)} companies are confirmed importers")
-        st.info(f"{len(non_importers)} companies not found in UK Trade data (may not trade internationally)")
-        
-        # Show some non-importers for debugging
-        if len(non_importers) > 0:
-            with st.expander("See companies not found in UK Trade data"):
-                st.write("These companies may not import/export, or names may not match exactly:")
-                for name in non_importers[:20]:
-                    st.write(f"- {name}")
+    # Step 2: Check UK Trade importer status for all companies
+    st.subheader("Step 2: Checking Importer Status")
+    st.info("Checking all companies against HMRC UK Trade data")
     
+    all_companies_data = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, company in enumerate(companies):
+        company_number = company.get("company_number")
+        company_name = company.get("title")
+        
+        # Skip if no company name
+        if not company_name:
+            continue
+        
+        status_text.text(f"Checking {i+1}/{len(companies)}: {company_name}")
+        
+        profile = get_company_profile_ch(company_number)
+        
+        if profile:
+            address = profile.get("registered_office_address", {})
+            postcode = address.get("postal_code", "")
+            
+            is_importer, trader_data = check_uk_trade_importer_api(company_name, postcode)
+            
+            all_companies_data.append({
+                "company_number": company_number,
+                "company_name": company_name,
+                "profile": profile,
+                "is_importer": is_importer,
+                "trader_data": trader_data
+            })
+        
+        progress_bar.progress((i + 1) / len(companies))
+        time.sleep(0.05)
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    # Count importers vs non-importers
+    importers = [c for c in all_companies_data if c["is_importer"]]
+    non_importers = [c for c in all_companies_data if not c["is_importer"]]
+    
+    st.success(f"Checked {len(all_companies_data)} companies: {len(importers)} importers, {len(non_importers)} non-importers")
+    
+    # Apply filter if requested
+    if check_importer:
+        final_companies = importers
+        st.info("Showing only importers (toggle off to see all companies)")
     else:
-        st.subheader("Step 2: Fetching Company Details")
-        
-        final_companies = []
-        progress_bar = st.progress(0)
-        
-        for i, company in enumerate(companies):
-            company_number = company.get("company_number")
-            company_name = company.get("title")
-            
-            profile = get_company_profile_ch(company_number)
-            
-            if profile:
-                final_companies.append({
-                    "company_number": company_number,
-                    "company_name": company_name,
-                    "profile": profile
-                })
-            
-            progress_bar.progress((i + 1) / len(companies))
-            time.sleep(0.1)
-        
-        progress_bar.empty()
-        st.success(f"Fetched details for {len(final_companies)} companies")
+        final_companies = all_companies_data
+        st.info("Showing all companies (toggle on to see only importers)")
     
     # Display Results
     if final_companies:
         st.subheader("Results")
         
+        # Prepare data for display
         results_data = []
         for company_data in final_companies:
             profile = company_data["profile"]
@@ -290,6 +353,7 @@ if start_search:
             results_data.append({
                 "Company Name": company_data["company_name"],
                 "Company Number": company_data["company_number"],
+                "Importer": "Yes" if company_data["is_importer"] else "No",
                 "Status": profile.get("company_status", "active"),
                 "Incorporated": profile.get("incorporation_date", ""),
                 "SIC Code": sic_code
@@ -307,6 +371,7 @@ if start_search:
         
         st.dataframe(df, use_container_width=True)
         
+        # Detailed view
         if len(df) > 0:
             selected = st.selectbox("View company details", df["Company Name"].tolist())
             if selected:
@@ -316,15 +381,29 @@ if start_search:
                 st.json({
                     "Company Name": company_data["company_name"],
                     "Company Number": company_data["company_number"],
+                    "Is Importer": company_data["is_importer"],
                     "Status": profile.get("company_status"),
                     "Type": profile.get("company_type"),
                     "Incorporated": profile.get("incorporation_date"),
                     "Address": profile.get("registered_office_address", {}),
                     "SIC Codes": [s.get("description") for s in profile.get("sic_codes", [])]
                 })
+                
+                # Show trader data if importer
+                if company_data["is_importer"] and company_data["trader_data"]:
+                    st.subheader("UK Trade Info")
+                    trader = company_data["trader_data"]
+                    st.json({
+                        "Name in HMRC Data": trader.get("Name"),
+                        "Import Entries": trader.get("ImportEntries"),
+                        "Export Entries": trader.get("ExportEntries"),
+                        "Postcode": trader.get("PostCode")
+                    })
+    
     else:
-        st.warning("No companies matched all criteria.")
-        st.info("Try a different SIC code or disable the importer filter")
+        st.warning("No companies matched your filter.")
+        if check_importer and len(importers) == 0:
+            st.info("No importers found for this SIC code. Try a different SIC code or disable the importer filter.")
 
 # Info Section
 with st.expander("Setup Instructions"):
@@ -359,11 +438,14 @@ with st.expander("Setup Instructions"):
     
     ---
     
-    ### Notes
+    ### How It Works
     
-    - Not all companies appear in UK Trade data (only those that import/export)
-    - Company names must match exactly between Companies House and HMRC data
-    - Some companies may trade under different names
+    1. Searches Companies House for companies with your SIC code
+    2. Checks each company against HMRC UK Trade database
+    3. Uses fuzzy matching to handle name variations
+    4. Shows all companies by default, toggle to see only importers
+    
+    **Note:** Not all companies import/export - many source domestically
     """)
 
 # Footer
