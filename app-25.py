@@ -5,7 +5,6 @@ from datetime import datetime
 from typing import List, Dict, Optional
 import time
 import pandas as pd
-import tempfile
 
 # Configuration
 COMPANIES_HOUSE_API_KEY = os.getenv("COMPANIES_HOUSE_API_KEY")
@@ -30,6 +29,9 @@ with st.sidebar:
     
     if uploaded_file is not None:
         st.success("CSV uploaded!")
+        # Show file info
+        st.write(f"File: {uploaded_file.name}")
+        st.write(f"Size: {len(uploaded_file.getvalue()):,} bytes")
     
     st.divider()
     
@@ -92,17 +94,17 @@ def normalize_name(name: str) -> str:
     return " ".join(name.split())
 
 def load_importer_csv(file) -> Optional[pd.DataFrame]:
-    """
-    Load HMRC importer data from uploaded CSV file
-    
-    Expected CSV format (from uktradeinfo.com):
-    CompanyName,Address1,Address2,Address3,Address4,Address5,PostCode,CommodityCode,HS2Description,CN8Description,TradeTypeDescription,Month,Year
-    """
+    """Load HMRC importer data from uploaded CSV file"""
     try:
         df = pd.read_csv(file)
         
+        # Show column info for debugging
+        st.info(f"CSV loaded: {len(df):,} rows, columns: {list(df.columns)}")
+        
         # Standardize column names
         df.columns = df.columns.str.strip().str.upper().str.replace(" ", "_").str.replace("-", "_")
+        
+        st.info(f"After standardization: {list(df.columns)}")
         
         # Check for required columns
         required_cols = ["COMPANYNAME", "POSTCODE"]
@@ -119,10 +121,19 @@ def load_importer_csv(file) -> Optional[pd.DataFrame]:
             for alt, standard in alternatives.items():
                 if alt in df.columns:
                     df.rename(columns={alt: standard}, inplace=True)
+                    st.write(f"Renamed {alt} → {standard}")
         
         # Check again after renaming
         if "COMPANYNAME" not in df.columns or "POSTCODE" not in df.columns:
             st.error(f"CSV missing required columns. Found: {list(df.columns)}")
+            st.error("""
+            **Expected columns:**
+            - CompanyName (or Company Name, NAME)
+            - PostCode (or Post Code, POST_CODE)
+            
+            Please download the CSV from:
+            https://www.uktradeinfo.com/trade-data/latest-bulk-data-sets/
+            """)
             return None
         
         # Create normalized name column for matching
@@ -130,20 +141,24 @@ def load_importer_csv(file) -> Optional[pd.DataFrame]:
         
         # Filter to only importers (if TradeType column exists)
         if "TRADETYPEDESCRIPTION" in df.columns:
+            original_count = len(df)
             df = df[df["TRADETYPEDESCRIPTION"].str.upper() == "IMPORT"]
+            st.write(f"Filtered to IMPORT only: {original_count:,} → {len(df):,} rows")
+        
+        # Show sample data
+        st.write("Sample data:")
+        st.dataframe(df[["COMPANYNAME", "POSTCODE"] + ([c for c in df.columns if "TRADETYPE" in c][:1])].head(5))
         
         return df
         
     except Exception as e:
         st.error(f"Error loading CSV: {e}")
+        import traceback
+        st.error(traceback.format_exc())
         return None
 
 def match_company_to_importer(company_name: str, postcode: str, importer_df: pd.DataFrame) -> tuple[bool, Optional[Dict]]:
-    """
-    Match a company to the importer CSV using fuzzy matching
-    
-    Returns: (is_match, match_data)
-    """
+    """Match a company to the importer CSV"""
     if importer_df is None or len(importer_df) == 0:
         return False, None
     
@@ -166,7 +181,7 @@ def match_company_to_importer(company_name: str, postcode: str, importer_df: pd.
         return True, matches.iloc[0].to_dict()
     
     # Strategy 2: Contains match (company name in CSV name or vice versa)
-    for idx, row in importer_df.iterrows():
+    for idx, row in importer_df.head(1000).iterrows():  # Limit search for speed
         csv_name_norm = row["COMPANYNAME_NORM"]
         
         if not csv_name_norm:
@@ -182,28 +197,6 @@ def match_company_to_importer(company_name: str, postcode: str, importer_df: pd.
                     return True, row.to_dict()
             else:
                 return True, row.to_dict()
-    
-    # Strategy 3: Word overlap (at least 2 words match)
-    company_words = set(company_name_norm.split())
-    
-    if len(company_words) >= 2:
-        for idx, row in importer_df.iterrows():
-            csv_name_norm = row["COMPANYNAME_NORM"]
-            if not csv_name_norm:
-                continue
-            
-            csv_words = set(csv_name_norm.split())
-            overlap = len(company_words & csv_words)
-            
-            if overlap >= 2:
-                # Postcode check
-                if postcode and "POSTCODE" in row:
-                    csv_postcode = str(row["POSTCODE"])
-                    postcode_prefix = postcode.replace(" ", "")[:4].upper()
-                    if csv_postcode.replace(" ", "").startswith(postcode_prefix):
-                        return True, row.to_dict()
-                else:
-                    return True, row.to_dict()
     
     return False, None
 
@@ -258,14 +251,7 @@ if start_search:
         st.stop()
     
     if uploaded_file is None:
-        st.error("""
-        **Please upload the HMRC Importer CSV first!**
-        
-        Download from:
-        1. https://www.uktradeinfo.com/trade-data/latest-bulk-data-sets/
-        OR
-        2. https://www.uktradeinfo.com/find-uk-traders/ → Search → Filter by Import → Download CSV
-        """)
+        st.error("Please upload the HMRC Importer CSV first!")
         st.stop()
     
     # Load importer CSV
@@ -279,10 +265,6 @@ if start_search:
         st.stop()
     
     st.success(f"Loaded {len(importer_df):,} importer records")
-    
-    # Show sample of importer data
-    with st.expander("Preview importer data"):
-        st.dataframe(importer_df.head(10))
     
     # Step 1: Search Companies House
     st.subheader("Step 1: Searching Companies House")
@@ -302,11 +284,17 @@ if start_search:
     
     st.success(f"Found {len(companies)} companies")
     
+    # Show first few companies for debugging
+    with st.expander("Preview Companies House results"):
+        for i, company in enumerate(companies[:5]):
+            st.write(f"{i+1}. {company.get('title')} ({company.get('company_number')})")
+    
     # Step 2: Match against importer data
     st.subheader("Step 2: Matching Against Importer Data")
     
     all_companies = []
     progress_bar = st.progress(0)
+    match_count = 0
     
     for i, company in enumerate(companies):
         company_number = company.get("company_number")
@@ -323,6 +311,11 @@ if start_search:
             
             is_importer, match_data = match_company_to_importer(company_name, postcode, importer_df)
             
+            if is_importer:
+                match_count += 1
+                if match_count <= 5:
+                    st.success(f"✓ Match found: {company_name}")
+            
             all_companies.append({
                 "company_number": company_number,
                 "company_name": company_name,
@@ -333,7 +326,7 @@ if start_search:
             })
         
         progress_bar.progress((i + 1) / len(companies))
-        time.sleep(0.05)
+        time.sleep(0.02)
     
     progress_bar.empty()
     
@@ -405,8 +398,6 @@ if start_search:
                         "Commodity Code": match.get("COMMODITYCODE"),
                         "Description": match.get("HS2DESCRIPTION"),
                         "Trade Type": match.get("TRADETYPEDESCRIPTION"),
-                        "Month": match.get("MONTH"),
-                        "Year": match.get("YEAR")
                     })
     else:
         st.warning("No companies match your filter")
@@ -427,35 +418,17 @@ with st.expander("Setup Instructions"):
     
     ### Step 2: Download Importer CSV
     
-    **Option A: Bulk Data**
     1. Go to https://www.uktradeinfo.com/trade-data/latest-bulk-data-sets/
-    2. Download "Importer details" CSV
+    2. Download "Importer details: May 2026 (ZIP, 4.4 MB)"
+    3. Extract the ZIP file
+    4. Upload the CSV in the sidebar
     
-    **Option B: Custom Search**
-    1. Go to https://www.uktradeinfo.com/find-uk-traders/
-    2. Search for your SIC code or commodity
-    3. Filter by 'Import' only
-    4. Click 'Download as CSV'
+    ### Expected CSV Format
     
-    ### Step 3: Upload CSV in Streamlit
-    
-    Use the file uploader in the sidebar to upload your CSV file.
-    
-    **Note:** The CSV is processed in memory and not stored permanently.
-    You'll need to re-upload it each session, or host it in your GitHub repo.
-    
-    ### CSV Format
-    
-    Expected columns (from uktradeinfo.com):
+    Columns should include:
     - CompanyName
-    - Address1, Address2, etc.
     - PostCode
-    - CommodityCode
-    - HS2Description
     - TradeTypeDescription (should be "Import")
-    - Month, Year
-    
-    The app will automatically normalize column names.
     """)
 
 # Footer
