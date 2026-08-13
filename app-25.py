@@ -18,20 +18,12 @@ This app cross-references Companies House data with UK Trade Importers data,
 then enriches matching companies with director information from the Companies House API.
 """)
 
-# Sidebar for API key and settings
+# Sidebar for API key
 st.sidebar.header("⚙️ Settings")
 api_key = st.sidebar.text_input(
     "Companies House API Key",
     type="password",
     help="Get your API key from https://developer.company-information.service.gov.uk/"
-)
-
-requests_per_second = st.sidebar.slider(
-    "API Rate Limit (requests/second)",
-    min_value=1,
-    max_value=10,
-    value=3,
-    help="Companies House allows 6 requests per second. Stay conservative to avoid throttling."
 )
 
 # Helper functions - defined first
@@ -184,7 +176,7 @@ def get_company_details(company_name, api_key):
         st.error(f"Error fetching company {company_name}: {e}")
         return None
 
-def enrich_with_directors(df, api_key, rate_limit):
+def enrich_with_directors(df, api_key):
     """Enrich DataFrame with director information from API using company name"""
     if not api_key:
         st.error("Please enter your Companies House API key in the sidebar.")
@@ -247,8 +239,6 @@ def enrich_with_directors(df, api_key, rate_limit):
         # Update progress (ensure value is between 0 and 1)
         progress_value = min((idx + 1) / total, 1.0)
         progress_bar.progress(progress_value)
-        
-        time.sleep(1 / rate_limit)
     
     status_text.text("✅ Completed!")
     return pd.DataFrame(enriched_data)
@@ -310,7 +300,7 @@ if ch_file and trade_file:
             
             if st.button("🚀 Fetch Director Details from Companies House API", type="primary"):
                 if api_key:
-                    enriched_df = enrich_with_directors(matched_df, api_key, requests_per_second)
+                    enriched_df = enrich_with_directors(matched_df, api_key)
                     
                     if enriched_df is not None and len(enriched_df) > 0:
                         st.success(f"✅ Enriched {len(enriched_df)} companies with director data")
@@ -333,7 +323,6 @@ else:
 # Footer
 st.markdown("---")
 st.markdown("""
-**Note:** Companies House API has a rate limit of 6 requests per second. 
-This app includes built-in rate limiting to avoid throttling. 
-For large datasets, consider running during off-peak hours.
+**Note:** Companies House API has a rate limit of 6 requests per second.
+Requests are made as fast as possible without artificial delays.
 """)
