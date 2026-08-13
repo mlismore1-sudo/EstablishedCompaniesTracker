@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import time
 from datetime import datetime
+import io
 
 # Page config
 st.set_page_config(
@@ -35,34 +36,97 @@ requests_per_second = st.sidebar.slider(
 
 # Helper functions - defined first
 def load_csv(file):
-    """Load CSV file into DataFrame"""
+    """Load CSV file into DataFrame with robust error handling"""
     try:
+        # Try standard parsing first
         df = pd.read_csv(file)
         return df
     except Exception as e:
-        st.error(f"Error loading CSV: {e}")
-        return None
+        st.warning(f"Standard CSV parsing failed: {e}")
+        st.info("Trying alternative parsing methods...")
+        
+        try:
+            # Try with Python engine which is more flexible
+            file.seek(0)
+            df = pd.read_csv(file, engine='python')
+            st.success("Loaded CSV with Python engine")
+            return df
+        except Exception as e2:
+            st.warning(f"Python engine also failed: {e2}")
+        
+        try:
+            # Try reading as text and handling manually
+            file.seek(0)
+            content = file.read()
+            if isinstance(content, bytes):
+                content = content.decode('utf-8', errors='ignore')
+            
+            lines = content.strip().split('\n')
+            header = lines[0].split(',')
+            num_cols = len(header)
+            
+            st.info(f"Header has {num_cols} columns: {header}")
+            
+            # Parse data rows
+            data_rows = []
+            skipped = 0
+            for i, line in enumerate(lines[1:], 2):
+                fields = line.split(',')
+                if len(fields) >= num_cols:
+                    # Take first N fields or pad if needed
+                    row_data = fields[:num_cols] if len(fields) > num_cols else fields
+                    data_rows.append(row_data)
+                else:
+                    # Pad with empty strings
+                    fields.extend([''] * (num_cols - len(fields)))
+                    data_rows.append(fields)
+                    skipped += 1
+            
+            df = pd.DataFrame(data_rows, columns=header)
+            st.success(f"Loaded CSV manually: {len(df)} rows ({skipped} rows had issues)")
+            return df
+            
+        except Exception as e3:
+            st.error(f"All parsing methods failed: {e3}")
+            return None
 
 def find_matching_companies(df_companies, df_trade):
-    """Find companies that appear in both datasets by matching Company_Name with CompanyName"""
-    if "Company_Name" not in df_companies.columns:
-        st.error(f"Companies House CSV missing 'Company_Name' column. Found: {list(df_companies.columns)}")
+    """Find companies that appear in both datasets by matching company_name with CompanyName"""
+    # Find company name columns (case-insensitive)
+    ch_name_col = None
+    trade_name_col = None
+    
+    for col in df_companies.columns:
+        if col.lower() in ['company_name', 'companyname', 'name']:
+            ch_name_col = col
+            break
+    
+    for col in df_trade.columns:
+        if col.lower() in ['companyname', 'company_name', 'name']:
+            trade_name_col = col
+            break
+    
+    if not ch_name_col:
+        st.error(f"Companies House CSV missing company name column. Found: {list(df_companies.columns)}")
         return None, None
     
-    if "CompanyName" not in df_trade.columns:
-        st.error(f"UK Trade Importers CSV missing 'CompanyName' column. Found: {list(df_trade.columns)}")
+    if not trade_name_col:
+        st.error(f"UK Trade Importers CSV missing company name column. Found: {list(df_trade.columns)}")
         return None, None
     
-    companies_set = set(df_companies["Company_Name"].dropna().astype(str).str.strip().str.upper())
-    trade_set = set(df_trade["CompanyName"].dropna().astype(str).str.strip().str.upper())
+    st.info(f"Matching on: '{ch_name_col}' (Companies House) ↔ '{trade_name_col}' (UK Trade)")
+    
+    # Normalize and match
+    companies_set = set(df_companies[ch_name_col].dropna().astype(str).str.strip().str.upper())
+    trade_set = set(df_trade[trade_name_col].dropna().astype(str).str.strip().str.upper())
     
     matching_values = companies_set & trade_set
     
     matched_companies = df_companies[
-        df_companies["Company_Name"].astype(str).str.strip().str.upper().isin(matching_values)
+        df_companies[ch_name_col].astype(str).str.strip().str.upper().isin(matching_values)
     ].copy()
     
-    return matched_companies, "Company_Name"
+    return matched_companies, ch_name_col
 
 def get_company_details(company_number, api_key):
     """Fetch company details from Companies House API"""
