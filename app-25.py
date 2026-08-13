@@ -6,9 +6,9 @@ from typing import List, Dict, Optional
 import time
 import pandas as pd
 
-# Configuration - Only 2 FREE APIs (no revenue filtering)
+# Configuration - Only 1 API key needed (Companies House)
+# UK Trade Info API is open access - no key required!
 COMPANIES_HOUSE_API_KEY = os.getenv("COMPANIES_HOUSE_API_KEY")
-UK_TRADE_API_KEY = os.getenv("UK_TRADE_API_KEY")
 
 # API Base URLs
 CH_BASE = "https://api.company-information.service.gov.uk"
@@ -19,7 +19,7 @@ st.set_page_config(page_title="UK Company Finder", layout="wide")
 
 # Title
 st.title("UK Company Finder")
-st.markdown("Find UK companies by SIC code and importer status - 100% free, no revenue filtering")
+st.markdown("Find UK companies by SIC code and importer status - 100% free")
 
 # Sidebar
 with st.sidebar:
@@ -112,14 +112,13 @@ def search_companies_by_sic(
 def check_uk_trade_importer_api(company_name: str, postcode: str = None) -> bool:
     """
     Check if company appears as importer via UK Trade Info API
-    FREE API with registration
-    """
-    if not UK_TRADE_API_KEY:
-        st.warning("UK Trade API key not set - skipping importer check")
-        return True  # Skip check if no API key
+    OPEN ACCESS - No API key required!
+    Rate limit: 60 requests per minute
     
+    API Documentation: https://www.uktradeinfo.com/api-documentation
+    """
     session = requests.Session()
-    session.headers.update({"Authorization": f"Bearer {UK_TRADE_API_KEY}"})
+    # NO authentication needed - API is open access
     
     # OData filter: search by company name
     company_name_clean = company_name.upper().replace(" LIMITED", "").replace(" LTD", "")
@@ -210,6 +209,7 @@ if start_search:
     # Step 2: Check UK Trade importer status
     if check_importer:
         st.subheader("Step 2: Verifying UK Trade Importer Status")
+        st.info("Using UK Trade Info API (open access - no API key required)")
         
         importer_filtered = []
         progress_bar = st.progress(0)
@@ -229,7 +229,7 @@ if start_search:
                 address = profile.get("registered_office_address", {})
                 postcode = address.get("postal_code", "")
                 
-                # Check importer status
+                # Check importer status (no API key needed!)
                 is_importer = check_uk_trade_importer_api(company_name, postcode)
                 
                 if is_importer:
@@ -326,9 +326,9 @@ if start_search:
 # Info Section
 with st.expander("API Setup Instructions"):
     st.markdown("""
-    ### Required API Keys (Both FREE)
+    ### Required API Key (Only 1!)
     
-    #### 1. Companies House API (Unlimited Free)
+    #### Companies House API (Unlimited Free)
     
     **Register:** https://developer.company-information.service.gov.uk/
     
@@ -341,21 +341,15 @@ with st.expander("API Setup Instructions"):
     
     ---
     
-    #### 2. UK Trade Info API (Unlimited Free)
+    #### UK Trade Info API (Open Access - No Key Needed!)
     
-    **Register:** https://www.uktradeinfo.com/api-documentation
+    **Base URL:** https://api.uktradeinfo.com
     
-    **What it provides:**
-    - Importer/exporter status
-    - Number of import entries
-    - Commodity codes traded
+    **Documentation:** https://www.uktradeinfo.com/api-documentation
     
-    **Setup in Streamlit Secrets:**
-    ```toml
-    UK_TRADE_API_KEY = "your_api_key_here"
-    ```
+    **Rate Limit:** 60 requests per minute
     
-    **Swagger UI:** https://api.uktradeinfo.com/swagger/ui/index
+    **No authentication required** - the API is completely open access!
     
     ---
     
@@ -364,7 +358,7 @@ with st.expander("API Setup Instructions"):
     **Total: GBP 0.00** (completely free, unlimited)
     
     - Companies House: FREE (unlimited)
-    - UK Trade Info: FREE (unlimited on free tier)
+    - UK Trade Info: FREE (open access, no key needed)
     
     ---
     
@@ -373,7 +367,7 @@ with st.expander("API Setup Instructions"):
     | API | Limit | Reset |
     |-----|-------|-------|
     | Companies House | 600 req | 5 minutes |
-    | UK Trade Info | 1000 req/hour | 1 hour |
+    | UK Trade Info | 60 req | 1 minute |
     
     ---
     
@@ -401,4 +395,4 @@ with st.expander("API Setup Instructions"):
 
 # Footer
 st.divider()
-st.caption("Data sources: Companies House API, HMRC UK Trade Info API")
+st.caption("Data sources: Companies House API, HMRC UK Trade Info API (open access)")
