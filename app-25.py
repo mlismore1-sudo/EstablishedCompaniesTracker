@@ -38,7 +38,6 @@ requests_per_second = st.sidebar.slider(
 def load_csv(file):
     """Load CSV file into DataFrame with robust error handling"""
     try:
-        # Try standard parsing first
         df = pd.read_csv(file)
         return df
     except Exception as e:
@@ -46,7 +45,6 @@ def load_csv(file):
         st.info("Trying alternative parsing methods...")
         
         try:
-            # Try with Python engine which is more flexible
             file.seek(0)
             df = pd.read_csv(file, engine='python')
             st.success("Loaded CSV with Python engine")
@@ -55,7 +53,6 @@ def load_csv(file):
             st.warning(f"Python engine also failed: {e2}")
         
         try:
-            # Try reading as text and handling manually
             file.seek(0)
             content = file.read()
             if isinstance(content, bytes):
@@ -67,17 +64,14 @@ def load_csv(file):
             
             st.info(f"Header has {num_cols} columns: {header}")
             
-            # Parse data rows
             data_rows = []
             skipped = 0
             for i, line in enumerate(lines[1:], 2):
                 fields = line.split(',')
                 if len(fields) >= num_cols:
-                    # Take first N fields or pad if needed
                     row_data = fields[:num_cols] if len(fields) > num_cols else fields
                     data_rows.append(row_data)
                 else:
-                    # Pad with empty strings
                     fields.extend([''] * (num_cols - len(fields)))
                     data_rows.append(fields)
                     skipped += 1
@@ -92,7 +86,6 @@ def load_csv(file):
 
 def find_matching_companies(df_companies, df_trade):
     """Find companies that appear in both datasets by matching company_name with CompanyName"""
-    # Find company name columns (case-insensitive)
     ch_name_col = None
     trade_name_col = None
     
@@ -116,7 +109,6 @@ def find_matching_companies(df_companies, df_trade):
     
     st.info(f"Matching on: '{ch_name_col}' (Companies House) ↔ '{trade_name_col}' (UK Trade)")
     
-    # Normalize and match
     companies_set = set(df_companies[ch_name_col].dropna().astype(str).str.strip().str.upper())
     trade_set = set(df_trade[trade_name_col].dropna().astype(str).str.strip().str.upper())
     
@@ -128,17 +120,39 @@ def find_matching_companies(df_companies, df_trade):
     
     return matched_companies, ch_name_col
 
-def get_company_details(company_number, api_key):
-    """Fetch company details from Companies House API"""
+def get_company_details(company_name, api_key):
+    """Fetch company details from Companies House API using company name search"""
     base_url = "https://api.company-information.service.gov.uk"
     
     try:
-        profile_url = f"{base_url}/company/{company_number}"
-        response = requests.get(profile_url, auth=(api_key, ""))
+        # Search for company by name
+        search_url = f"{base_url}/search/companies"
+        params = {"q": company_name, "size": 1}
+        response = requests.get(search_url, auth=(api_key, ""), params=params)
         
         if response.status_code == 200:
-            company_data = response.json()
+            search_data = response.json()
+            items = search_data.get("items", [])
             
+            if not items:
+                st.warning(f"No company found for: {company_name}")
+                return None
+            
+            # Get the first (best) match
+            company_data = items[0]
+            company_number = company_data.get("company_number")
+            
+            # Get full company profile
+            profile_url = f"{base_url}/company/{company_number}"
+            profile_response = requests.get(profile_url, auth=(api_key, ""))
+            
+            if profile_response.status_code != 200:
+                st.warning(f"API error for company {company_number}: {profile_response.status_code}")
+                return None
+            
+            company_profile = profile_response.json()
+            
+            # Get directors
             directors_url = f"{base_url}/company/{company_number}/officers"
             directors_response = requests.get(directors_url, auth=(api_key, ""))
             
@@ -162,33 +176,36 @@ def get_company_details(company_number, api_key):
                         })
             
             return {
-                "company_name": company_data.get("company_name", ""),
-                "incorporation_date": company_data.get("incorporation_date", ""),
+                "company_name": company_profile.get("company_name", ""),
+                "incorporation_date": company_profile.get("incorporation_date", ""),
                 "directors": directors
             }
         else:
-            st.warning(f"API error for company {company_number}: {response.status_code}")
+            st.warning(f"Search API error for {company_name}: {response.status_code}")
             return None
             
     except Exception as e:
-        st.error(f"Error fetching company {company_number}: {e}")
+        st.error(f"Error fetching company {company_name}: {e}")
         return None
 
 def enrich_with_directors(df, api_key, rate_limit):
-    """Enrich DataFrame with director information from API"""
+    """Enrich DataFrame with director information from API using company name"""
     if not api_key:
         st.error("Please enter your Companies House API key in the sidebar.")
         return None
     
-    company_col = None
-    for col in ["Company Number", "company_number", "CompanyNumber", "company no", "reg_no"]:
+    # Find company name column
+    name_col = None
+    for col in ["company_name", "Company_Name", "companyname", "CompanyName", "name", "Name"]:
         if col in df.columns:
-            company_col = col
+            name_col = col
             break
     
-    if company_col is None:
-        st.error("Could not find a company number column. Please ensure your CSV has a column named 'Company Number' or similar.")
+    if name_col is None:
+        st.error(f"Could not find a company name column. Found: {list(df.columns)}")
         return None
+    
+    st.info(f"Using column '{name_col}' for company name lookups")
     
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -197,14 +214,13 @@ def enrich_with_directors(df, api_key, rate_limit):
     total = len(df)
     
     for idx, row in df.iterrows():
-        company_number = str(row[company_col]).strip()
-        status_text.text(f"Fetching details for {idx + 1}/{total}: {company_number}")
+        company_name = str(row[name_col]).strip()
+        status_text.text(f"Fetching details for {idx + 1}/{total}: {company_name}")
         
-        details = get_company_details(company_number, api_key)
+        details = get_company_details(company_name, api_key)
         
         if details:
             base_row = {
-                "company_number": company_number,
                 "company_name": details["company_name"],
                 "incorporation_date": details["incorporation_date"]
             }
@@ -221,7 +237,6 @@ def enrich_with_directors(df, api_key, rate_limit):
             enriched_data.append(base_row)
         else:
             base_row = {
-                "company_number": company_number,
                 "company_name": "",
                 "incorporation_date": ""
             }
