@@ -107,20 +107,22 @@ def check_uk_trade_importer_api(company_name: str, postcode: str = None) -> bool
     """
     Check if company appears as importer via UK Trade Info API
     OPEN ACCESS - No API key required!
+    
+    Uses the /Trader endpoint with OData filter to find traders with import activity
+    API docs: https://www.uktradeinfo.com/api-documentation
     """
     if not company_name or not isinstance(company_name, str):
         return False
     
     session = requests.Session()
     
-    # OData filter: search by company name
-    company_name_clean = company_name.upper().replace(" LIMITED", "").replace(" LTD", "")
-    filter_query = f"contains(tolower(Name), '{company_name_clean.lower()}')"
+    # Clean company name for matching
+    company_name_clean = company_name.upper().replace(" LIMITED", "").replace(" LTD", "").replace(" PLC", "").strip()
     
-    # Add postcode filter if provided
-    if postcode:
-        postcode_prefix = postcode.replace(" ", "")[:3].upper()
-        filter_query += f" and startswith(replace(PostCode, ' ', ''), '{postcode_prefix}')"
+    # Try multiple search strategies
+    
+    # Strategy 1: Search by company name with contains filter
+    filter_query = f"contains(tolower(Name), '{company_name_clean.lower()}')"
     
     try:
         response = session.get(
@@ -128,7 +130,7 @@ def check_uk_trade_importer_api(company_name: str, postcode: str = None) -> bool
             params={
                 "$filter": filter_query,
                 "$select": "Name,PostCode,ImportEntries,ExportEntries",
-                "$top": 10
+                "$top": 20
             },
             timeout=15
         )
@@ -137,11 +139,18 @@ def check_uk_trade_importer_api(company_name: str, postcode: str = None) -> bool
             data = response.json()
             traders = data.get("value", [])
             
+            # Check if any matching trader has import activity
             for trader in traders:
                 import_entries = trader.get("ImportEntries", 0)
+                trader_name = trader.get("Name", "")
                 
-                if import_entries > 0:
-                    return True
+                if import_entries and import_entries > 0:
+                    # Additional check: make sure names are similar
+                    trader_name_clean = trader_name.upper().replace(" LIMITED", "").replace(" LTD", "").replace(" PLC", "").strip()
+                    
+                    # Simple string matching
+                    if company_name_clean in trader_name_clean or trader_name_clean in company_name_clean:
+                        return True
             
     except requests.exceptions.RequestException as e:
         st.warning(f"UK Trade API error: {e}")
@@ -195,9 +204,10 @@ if start_search:
     # Step 2: Check UK Trade importer status
     if check_importer:
         st.subheader("Step 2: Checking Importer Status")
-        st.info("Using UK Trade Info API (open access - no API key needed)")
+        st.info("Using UK Trade Info API (open access)")
         
         importer_filtered = []
+        non_importers = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -225,14 +235,24 @@ if start_search:
                         "company_name": company_name,
                         "profile": profile
                     })
+                else:
+                    non_importers.append(company_name)
             
             progress_bar.progress((i + 1) / len(companies))
-            time.sleep(0.1)
+            time.sleep(0.05)  # Faster rate limiting
         
         progress_bar.empty()
         status_text.empty()
         final_companies = importer_filtered
         st.success(f"{len(final_companies)} companies are confirmed importers")
+        st.info(f"{len(non_importers)} companies not found in UK Trade data (may not trade internationally)")
+        
+        # Show some non-importers for debugging
+        if len(non_importers) > 0:
+            with st.expander("See companies not found in UK Trade data"):
+                st.write("These companies may not import/export, or names may not match exactly:")
+                for name in non_importers[:20]:
+                    st.write(f"- {name}")
     
     else:
         st.subheader("Step 2: Fetching Company Details")
@@ -304,6 +324,7 @@ if start_search:
                 })
     else:
         st.warning("No companies matched all criteria.")
+        st.info("Try a different SIC code or disable the importer filter")
 
 # Info Section
 with st.expander("Setup Instructions"):
@@ -335,6 +356,14 @@ with st.expander("Setup Instructions"):
     
     - Companies House: 600 requests per 5 minutes
     - UK Trade Info: 60 requests per minute
+    
+    ---
+    
+    ### Notes
+    
+    - Not all companies appear in UK Trade data (only those that import/export)
+    - Company names must match exactly between Companies House and HMRC data
+    - Some companies may trade under different names
     """)
 
 # Footer
