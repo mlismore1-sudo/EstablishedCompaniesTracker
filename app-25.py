@@ -125,7 +125,6 @@ def get_company_details(company_name, api_key):
     base_url = "https://api.company-information.service.gov.uk"
     
     try:
-        # Search for company by name
         search_url = f"{base_url}/search/companies"
         params = {"q": company_name, "size": 1}
         response = requests.get(search_url, auth=(api_key, ""), params=params)
@@ -138,11 +137,9 @@ def get_company_details(company_name, api_key):
                 st.warning(f"No company found for: {company_name}")
                 return None
             
-            # Get the first (best) match
             company_data = items[0]
             company_number = company_data.get("company_number")
             
-            # Get full company profile
             profile_url = f"{base_url}/company/{company_number}"
             profile_response = requests.get(profile_url, auth=(api_key, ""))
             
@@ -152,7 +149,6 @@ def get_company_details(company_name, api_key):
             
             company_profile = profile_response.json()
             
-            # Get directors
             directors_url = f"{base_url}/company/{company_number}/officers"
             directors_response = requests.get(directors_url, auth=(api_key, ""))
             
@@ -194,7 +190,6 @@ def enrich_with_directors(df, api_key, rate_limit):
         st.error("Please enter your Companies House API key in the sidebar.")
         return None
     
-    # Find company name column
     name_col = None
     for col in ["company_name", "Company_Name", "companyname", "CompanyName", "name", "Name"]:
         if col in df.columns:
@@ -207,11 +202,15 @@ def enrich_with_directors(df, api_key, rate_limit):
     
     st.info(f"Using column '{name_col}' for company name lookups")
     
+    total = len(df)
+    if total == 0:
+        st.warning("No companies to enrich")
+        return pd.DataFrame()
+    
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     enriched_data = []
-    total = len(df)
     
     for idx, row in df.iterrows():
         company_name = str(row[name_col]).strip()
@@ -245,8 +244,11 @@ def enrich_with_directors(df, api_key, rate_limit):
                 base_row[f"director_{i}_surname"] = ""
             enriched_data.append(base_row)
         
+        # Update progress (ensure value is between 0 and 1)
+        progress_value = min((idx + 1) / total, 1.0)
+        progress_bar.progress(progress_value)
+        
         time.sleep(1 / rate_limit)
-        progress_bar.progress((idx + 1) / total)
     
     status_text.text("✅ Completed!")
     return pd.DataFrame(enriched_data)
@@ -310,7 +312,7 @@ if ch_file and trade_file:
                 if api_key:
                     enriched_df = enrich_with_directors(matched_df, api_key, requests_per_second)
                     
-                    if enriched_df is not None:
+                    if enriched_df is not None and len(enriched_df) > 0:
                         st.success(f"✅ Enriched {len(enriched_df)} companies with director data")
                         st.header("5. Final Results")
                         st.dataframe(enriched_df)
