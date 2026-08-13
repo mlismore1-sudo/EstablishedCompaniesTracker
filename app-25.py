@@ -5,24 +5,34 @@ from datetime import datetime
 from typing import List, Dict, Optional
 import time
 import pandas as pd
-from difflib import SequenceMatcher
+import tempfile
 
-# Configuration - Only 1 API key needed (Companies House)
+# Configuration
 COMPANIES_HOUSE_API_KEY = os.getenv("COMPANIES_HOUSE_API_KEY")
 
 # API Base URLs
 CH_BASE = "https://api.company-information.service.gov.uk"
-UK_TRADE_BASE = "https://api.uktradeinfo.com"
 
 # Page config
 st.set_page_config(page_title="UK Company Finder", layout="wide")
-
-# Title
 st.title("UK Company Finder")
-st.markdown("Find UK companies by SIC code - filter by importer status")
+st.markdown("Find UK companies by SIC code - matched against HMRC importer data")
 
 # Sidebar
 with st.sidebar:
+    st.header("Upload Importer Data")
+    
+    uploaded_file = st.file_uploader(
+        label="Upload HMRC Importer CSV",
+        type=["csv"],
+        help="Download from https://www.uktradeinfo.com/trade-data/latest-bulk-data-sets/"
+    )
+    
+    if uploaded_file is not None:
+        st.success("CSV uploaded!")
+    
+    st.divider()
+    
     st.header("Filters")
     
     sic_code = st.text_input(
@@ -48,18 +58,17 @@ with st.sidebar:
         index=0
     )
     
-    check_importer = st.checkbox(
+    show_only_importers = st.checkbox(
         label="Show only importers",
         value=False,
-        help="Filter to only companies confirmed as importers in HMRC data"
+        help="Filter to only companies in HMRC importer data"
     )
     
     max_results = st.slider(
-        label="Max results to fetch",
+        label="Max results",
         min_value=50,
         max_value=500,
-        value=100,
-        help="Companies House API limit: 600 requests per 5 minutes"
+        value=100
     )
     
     start_search = st.button("Start Search", type="primary", use_container_width=True)
@@ -70,70 +79,133 @@ def get_ch_session():
     session.auth = (COMPANIES_HOUSE_API_KEY, "")
     return session
 
-def normalize_company_name(name: str) -> str:
-    """
-    Normalize company name for flexible matching
-    Removes common suffixes and standardizes format
-    """
+def normalize_name(name: str) -> str:
+    """Normalize company name for matching"""
     if not name:
         return ""
-    
-    # Convert to uppercase and strip
-    name = name.upper().strip()
-    
+    name = str(name).upper().strip()
     # Remove common suffixes
-    suffixes = [
-        " LIMITED", " LTD", " PLC", " LLP", " CIC",
-        " AND COMPANY", " & COMPANY", " AND CO", " & CO",
-        " HOLDINGS", " GROUP", " UK", " GB"
-    ]
-    
-    for suffix in suffixes:
+    for suffix in [" LIMITED", " LTD", " PLC", " LLP", " AND COMPANY", " & COMPANY", " AND CO", " & CO", " HOLDINGS", " GROUP"]:
         if name.endswith(suffix):
             name = name[:-len(suffix)]
-    
-    # Remove punctuation and extra spaces
     name = name.replace("&", "AND").replace(".", "").replace(",", "").replace("-", " ")
-    name = " ".join(name.split())  # Remove extra spaces
-    
-    return name
+    return " ".join(name.split())
 
-def fuzzy_match_names(name1: str, name2: str, threshold: float = 0.7) -> bool:
+def load_importer_csv(file) -> Optional[pd.DataFrame]:
     """
-    Fuzzy match two company names using multiple strategies
-    Returns True if names are similar enough
+    Load HMRC importer data from uploaded CSV file
+    
+    Expected CSV format (from uktradeinfo.com):
+    CompanyName,Address1,Address2,Address3,Address4,Address5,PostCode,CommodityCode,HS2Description,CN8Description,TradeTypeDescription,Month,Year
     """
-    if not name1 or not name2:
-        return False
+    try:
+        df = pd.read_csv(file)
+        
+        # Standardize column names
+        df.columns = df.columns.str.strip().str.upper().str.replace(" ", "_").str.replace("-", "_")
+        
+        # Check for required columns
+        required_cols = ["COMPANYNAME", "POSTCODE"]
+        if not all(col in df.columns for col in required_cols):
+            # Try alternative column names
+            alternatives = {
+                "COMPANY_NAME": "COMPANYNAME",
+                "COMPANY NAME": "COMPANYNAME",
+                "NAME": "COMPANYNAME",
+                "POST_CODE": "POSTCODE",
+                "POST CODE": "POSTCODE"
+            }
+            
+            for alt, standard in alternatives.items():
+                if alt in df.columns:
+                    df.rename(columns={alt: standard}, inplace=True)
+        
+        # Check again after renaming
+        if "COMPANYNAME" not in df.columns or "POSTCODE" not in df.columns:
+            st.error(f"CSV missing required columns. Found: {list(df.columns)}")
+            return None
+        
+        # Create normalized name column for matching
+        df["COMPANYNAME_NORM"] = df["COMPANYNAME"].apply(normalize_name)
+        
+        # Filter to only importers (if TradeType column exists)
+        if "TRADETYPEDESCRIPTION" in df.columns:
+            df = df[df["TRADETYPEDESCRIPTION"].str.upper() == "IMPORT"]
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Error loading CSV: {e}")
+        return None
+
+def match_company_to_importer(company_name: str, postcode: str, importer_df: pd.DataFrame) -> tuple[bool, Optional[Dict]]:
+    """
+    Match a company to the importer CSV using fuzzy matching
     
-    # Normalize both names
-    norm1 = normalize_company_name(name1)
-    norm2 = normalize_company_name(name2)
+    Returns: (is_match, match_data)
+    """
+    if importer_df is None or len(importer_df) == 0:
+        return False, None
     
-    # Exact match after normalization
-    if norm1 == norm2:
-        return True
+    company_name_norm = normalize_name(company_name)
     
-    # Check if one contains the other
-    if norm1 in norm2 or norm2 in norm1:
-        return True
+    if not company_name_norm:
+        return False, None
     
-    # Check word overlap (at least 50% of words match)
-    words1 = set(norm1.split())
-    words2 = set(norm2.split())
+    # Strategy 1: Exact match on normalized name
+    matches = importer_df[importer_df["COMPANYNAME_NORM"] == company_name_norm]
     
-    if len(words1) > 0 and len(words2) > 0:
-        overlap = len(words1 & words2)
-        min_words = min(len(words1), len(words2))
-        if overlap / min_words >= 0.5:
-            return True
+    if len(matches) > 0:
+        # If we have postcode, filter by that too
+        if postcode:
+            postcode_prefix = postcode.replace(" ", "")[:4].upper()
+            matches_postcode = matches[matches["POSTCODE"].str.replace(" ", "").str.startswith(postcode_prefix, na=False)]
+            if len(matches_postcode) > 0:
+                return True, matches_postcode.iloc[0].to_dict()
+        # Return first match even without postcode match
+        return True, matches.iloc[0].to_dict()
     
-    # Sequence matching (fuzzy string similarity)
-    ratio = SequenceMatcher(None, norm1, norm2).ratio()
-    if ratio >= threshold:
-        return True
+    # Strategy 2: Contains match (company name in CSV name or vice versa)
+    for idx, row in importer_df.iterrows():
+        csv_name_norm = row["COMPANYNAME_NORM"]
+        
+        if not csv_name_norm:
+            continue
+        
+        # Check if one contains the other
+        if company_name_norm in csv_name_norm or csv_name_norm in company_name_norm:
+            # Postcode check if available
+            if postcode and "POSTCODE" in row:
+                csv_postcode = str(row["POSTCODE"])
+                postcode_prefix = postcode.replace(" ", "")[:4].upper()
+                if csv_postcode.replace(" ", "").startswith(postcode_prefix):
+                    return True, row.to_dict()
+            else:
+                return True, row.to_dict()
     
-    return False
+    # Strategy 3: Word overlap (at least 2 words match)
+    company_words = set(company_name_norm.split())
+    
+    if len(company_words) >= 2:
+        for idx, row in importer_df.iterrows():
+            csv_name_norm = row["COMPANYNAME_NORM"]
+            if not csv_name_norm:
+                continue
+            
+            csv_words = set(csv_name_norm.split())
+            overlap = len(company_words & csv_words)
+            
+            if overlap >= 2:
+                # Postcode check
+                if postcode and "POSTCODE" in row:
+                    csv_postcode = str(row["POSTCODE"])
+                    postcode_prefix = postcode.replace(" ", "")[:4].upper()
+                    if csv_postcode.replace(" ", "").startswith(postcode_prefix):
+                        return True, row.to_dict()
+                else:
+                    return True, row.to_dict()
+    
+    return False, None
 
 def search_companies_by_sic(
     sic_code: str,
@@ -160,119 +232,62 @@ def search_companies_by_sic(
             timeout=30
         )
         response.raise_for_status()
-        
-        remaining = response.headers.get("X-Ratelimit-Remain", "unknown")
-        st.caption(f"Companies House API: {remaining} requests remaining")
-        
         return response.json().get("items", [])
     except requests.exceptions.RequestException as e:
-        st.error(f"Companies House API error: {e}")
+        st.error(f"Companies House error: {e}")
         return []
-
-def check_uk_trade_importer_api(company_name: str, postcode: str = None) -> tuple[bool, Optional[Dict]]:
-    """
-    Check if company appears as importer via UK Trade Info API
-    Returns: (is_importer, trader_data)
-    """
-    if not company_name or not isinstance(company_name, str):
-        return False, None
-    
-    session = requests.Session()
-    
-    # Normalize company name for searching
-    company_name_clean = normalize_company_name(company_name)
-    
-    # Strategy 1: Search by exact company name
-    filter_query = f"contains(tolower(Name), '{company_name_clean.lower()}')"
-    
-    try:
-        response = session.get(
-            f"{UK_TRADE_BASE}/Trader",
-            params={
-                "$filter": filter_query,
-                "$select": "Name,PostCode,ImportEntries,ExportEntries,CommodityCode,HS2Description",
-                "$top": 50
-            },
-            timeout=15
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            traders = data.get("value", [])
-            
-            # Check each trader for import activity and name match
-            for trader in traders:
-                import_entries = trader.get("ImportEntries", 0)
-                trader_name = trader.get("Name", "")
-                
-                # Check if trader has import activity
-                if import_entries and import_entries > 0:
-                    # Use fuzzy matching
-                    if fuzzy_match_names(company_name, trader_name, threshold=0.6):
-                        return True, trader
-            
-            # Strategy 2: If no exact match, try partial name (first 3 words)
-            if len(company_name_clean.split()) >= 3:
-                partial_name = " ".join(company_name_clean.split()[:3])
-                filter_query2 = f"contains(tolower(Name), '{partial_name.lower()}')"
-                
-                response2 = session.get(
-                    f"{UK_TRADE_BASE}/Trader",
-                    params={
-                        "$filter": filter_query2,
-                        "$select": "Name,PostCode,ImportEntries,ExportEntries",
-                        "$top": 50
-                    },
-                    timeout=15
-                )
-                
-                if response2.status_code == 200:
-                    data2 = response2.json()
-                    traders2 = data2.get("value", [])
-                    
-                    for trader in traders2:
-                        import_entries = trader.get("ImportEntries", 0)
-                        trader_name = trader.get("Name", "")
-                        
-                        if import_entries and import_entries > 0:
-                            if fuzzy_match_names(company_name, trader_name, threshold=0.6):
-                                return True, trader
-            
-    except requests.exceptions.RequestException as e:
-        st.warning(f"UK Trade API error: {e}")
-    
-    return False, None
 
 def get_company_profile_ch(company_number: str) -> Optional[Dict]:
     session = get_ch_session()
-    
     try:
-        response = session.get(
-            f"{CH_BASE}/company/{company_number}",
-            timeout=10
-        )
+        response = session.get(f"{CH_BASE}/company/{company_number}", timeout=10)
         if response.status_code == 200:
             return response.json()
     except:
         pass
-    
     return None
 
 # Main Search Logic
 if start_search:
     if not sic_code or len(sic_code) != 5:
-        st.error("Please enter a valid 5-digit SIC code")
+        st.error("Please enter a 5-digit SIC code")
         st.stop()
     
     if not COMPANIES_HOUSE_API_KEY:
         st.error("Companies House API key not set")
-        st.info("Add COMPANIES_HOUSE_API_KEY to Streamlit Secrets")
         st.stop()
+    
+    if uploaded_file is None:
+        st.error("""
+        **Please upload the HMRC Importer CSV first!**
+        
+        Download from:
+        1. https://www.uktradeinfo.com/trade-data/latest-bulk-data-sets/
+        OR
+        2. https://www.uktradeinfo.com/find-uk-traders/ → Search → Filter by Import → Download CSV
+        """)
+        st.stop()
+    
+    # Load importer CSV
+    st.subheader("Loading Importer Data")
+    
+    with st.spinner("Loading HMRC importer data..."):
+        importer_df = load_importer_csv(uploaded_file)
+    
+    if importer_df is None:
+        st.error("Failed to load CSV. Please check the file format.")
+        st.stop()
+    
+    st.success(f"Loaded {len(importer_df):,} importer records")
+    
+    # Show sample of importer data
+    with st.expander("Preview importer data"):
+        st.dataframe(importer_df.head(10))
     
     # Step 1: Search Companies House
     st.subheader("Step 1: Searching Companies House")
     
-    with st.spinner(f"Searching for SIC {sic_code}..."):
+    with st.spinner(f"Searching SIC {sic_code}..."):
         companies = search_companies_by_sic(
             sic_code=sic_code,
             incorporation_from=incorporation_from.strftime("%Y-%m-%d"),
@@ -282,28 +297,23 @@ if start_search:
         )
     
     if not companies:
-        st.warning("No companies found. Try adjusting your filters.")
+        st.warning("No companies found")
         st.stop()
     
     st.success(f"Found {len(companies)} companies")
     
-    # Step 2: Check UK Trade importer status for all companies
-    st.subheader("Step 2: Checking Importer Status")
-    st.info("Checking all companies against HMRC UK Trade data")
+    # Step 2: Match against importer data
+    st.subheader("Step 2: Matching Against Importer Data")
     
-    all_companies_data = []
+    all_companies = []
     progress_bar = st.progress(0)
-    status_text = st.empty()
     
     for i, company in enumerate(companies):
         company_number = company.get("company_number")
         company_name = company.get("title")
         
-        # Skip if no company name
         if not company_name:
             continue
-        
-        status_text.text(f"Checking {i+1}/{len(companies)}: {company_name}")
         
         profile = get_company_profile_ch(company_number)
         
@@ -311,59 +321,58 @@ if start_search:
             address = profile.get("registered_office_address", {})
             postcode = address.get("postal_code", "")
             
-            is_importer, trader_data = check_uk_trade_importer_api(company_name, postcode)
+            is_importer, match_data = match_company_to_importer(company_name, postcode, importer_df)
             
-            all_companies_data.append({
+            all_companies.append({
                 "company_number": company_number,
                 "company_name": company_name,
                 "profile": profile,
                 "is_importer": is_importer,
-                "trader_data": trader_data
+                "match_data": match_data,
+                "postcode": postcode
             })
         
         progress_bar.progress((i + 1) / len(companies))
         time.sleep(0.05)
     
     progress_bar.empty()
-    status_text.empty()
     
-    # Count importers vs non-importers
-    importers = [c for c in all_companies_data if c["is_importer"]]
-    non_importers = [c for c in all_companies_data if not c["is_importer"]]
+    # Count results
+    importers = [c for c in all_companies if c["is_importer"]]
+    non_importers = [c for c in all_companies if not c["is_importer"]]
     
-    st.success(f"Checked {len(all_companies_data)} companies: {len(importers)} importers, {len(non_importers)} non-importers")
+    st.write(f"**Results:** {len(importers)} importers, {len(non_importers)} non-importers")
     
-    # Apply filter if requested
-    if check_importer:
-        final_companies = importers
-        st.info("Showing only importers (toggle off to see all companies)")
+    # Apply filter
+    if show_only_importers:
+        display_companies = importers
+        st.info("Showing only importers")
     else:
-        final_companies = all_companies_data
-        st.info("Showing all companies (toggle on to see only importers)")
+        display_companies = all_companies
+        st.info("Showing all companies")
     
     # Display Results
-    if final_companies:
+    if display_companies:
         st.subheader("Results")
         
-        # Prepare data for display
         results_data = []
-        for company_data in final_companies:
-            profile = company_data["profile"]
-            
+        for c in display_companies:
+            profile = c["profile"]
             results_data.append({
-                "Company Name": company_data["company_name"],
-                "Company Number": company_data["company_number"],
-                "Importer": "Yes" if company_data["is_importer"] else "No",
+                "Company Name": c["company_name"],
+                "Company Number": c["company_number"],
+                "Importer": "Yes" if c["is_importer"] else "No",
+                "Postcode": c["postcode"],
                 "Status": profile.get("company_status", "active"),
-                "Incorporated": profile.get("incorporation_date", ""),
-                "SIC Code": sic_code
+                "Incorporated": profile.get("incorporation_date", "")
             })
         
         df = pd.DataFrame(results_data)
         
+        # Download
         csv = df.to_csv(index=False)
         st.download_button(
-            label="Download Results (CSV)",
+            label="Download Results CSV",
             data=csv,
             file_name=f"uk_companies_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
             mime="text/csv"
@@ -371,48 +380,41 @@ if start_search:
         
         st.dataframe(df, use_container_width=True)
         
-        # Detailed view
+        # Detail view
         if len(df) > 0:
-            selected = st.selectbox("View company details", df["Company Name"].tolist())
+            selected = st.selectbox("View details", df["Company Name"].tolist())
             if selected:
-                company_data = next(c for c in final_companies if c["company_name"] == selected)
-                profile = company_data["profile"]
+                c = next(x for x in display_companies if x["company_name"] == selected)
+                profile = c["profile"]
                 
                 st.json({
-                    "Company Name": company_data["company_name"],
-                    "Company Number": company_data["company_number"],
-                    "Is Importer": company_data["is_importer"],
+                    "Company": c["company_name"],
+                    "Number": c["company_number"],
+                    "Importer": c["is_importer"],
+                    "Postcode": c["postcode"],
                     "Status": profile.get("company_status"),
-                    "Type": profile.get("company_type"),
-                    "Incorporated": profile.get("incorporation_date"),
-                    "Address": profile.get("registered_office_address", {}),
-                    "SIC Codes": [s.get("description") for s in profile.get("sic_codes", [])]
+                    "Address": profile.get("registered_office_address", {})
                 })
                 
-                # Show trader data if importer
-                if company_data["is_importer"] and company_data["trader_data"]:
-                    st.subheader("UK Trade Info")
-                    trader = company_data["trader_data"]
+                if c["is_importer"] and c["match_data"]:
+                    st.subheader("HMRC Importer Data")
+                    match = c["match_data"]
                     st.json({
-                        "Name in HMRC Data": trader.get("Name"),
-                        "Import Entries": trader.get("ImportEntries"),
-                        "Export Entries": trader.get("ExportEntries"),
-                        "Postcode": trader.get("PostCode")
+                        "Name in HMRC": match.get("COMPANYNAME"),
+                        "Postcode": match.get("POSTCODE"),
+                        "Commodity Code": match.get("COMMODITYCODE"),
+                        "Description": match.get("HS2DESCRIPTION"),
+                        "Trade Type": match.get("TRADETYPEDESCRIPTION"),
+                        "Month": match.get("MONTH"),
+                        "Year": match.get("YEAR")
                     })
-    
     else:
-        st.warning("No companies matched your filter.")
-        if check_importer and len(importers) == 0:
-            st.info("No importers found for this SIC code. Try a different SIC code or disable the importer filter.")
+        st.warning("No companies match your filter")
 
-# Info Section
+# Info
 with st.expander("Setup Instructions"):
     st.markdown("""
-    ### API Keys Required
-    
-    **Only 1 API key needed:**
-    
-    #### Companies House API (FREE)
+    ### Step 1: Get Companies House API Key
     
     1. Go to https://developer.company-information.service.gov.uk/
     2. Register for free
@@ -420,34 +422,42 @@ with st.expander("Setup Instructions"):
     4. Add to Streamlit Secrets:
     
     ```toml
-    COMPANIES_HOUSE_API_KEY = "your_key_here"
+    COMPANIES_HOUSE_API_KEY = "your_key"
     ```
     
-    #### UK Trade Info API (OPEN ACCESS)
+    ### Step 2: Download Importer CSV
     
-    **No API key needed!** This API is completely open access.
+    **Option A: Bulk Data**
+    1. Go to https://www.uktradeinfo.com/trade-data/latest-bulk-data-sets/
+    2. Download "Importer details" CSV
     
-    Documentation: https://www.uktradeinfo.com/api-documentation
+    **Option B: Custom Search**
+    1. Go to https://www.uktradeinfo.com/find-uk-traders/
+    2. Search for your SIC code or commodity
+    3. Filter by 'Import' only
+    4. Click 'Download as CSV'
     
-    ---
+    ### Step 3: Upload CSV in Streamlit
     
-    ### Rate Limits
+    Use the file uploader in the sidebar to upload your CSV file.
     
-    - Companies House: 600 requests per 5 minutes
-    - UK Trade Info: 60 requests per minute
+    **Note:** The CSV is processed in memory and not stored permanently.
+    You'll need to re-upload it each session, or host it in your GitHub repo.
     
-    ---
+    ### CSV Format
     
-    ### How It Works
+    Expected columns (from uktradeinfo.com):
+    - CompanyName
+    - Address1, Address2, etc.
+    - PostCode
+    - CommodityCode
+    - HS2Description
+    - TradeTypeDescription (should be "Import")
+    - Month, Year
     
-    1. Searches Companies House for companies with your SIC code
-    2. Checks each company against HMRC UK Trade database
-    3. Uses fuzzy matching to handle name variations
-    4. Shows all companies by default, toggle to see only importers
-    
-    **Note:** Not all companies import/export - many source domestically
+    The app will automatically normalize column names.
     """)
 
 # Footer
 st.divider()
-st.caption("Data: Companies House API, HMRC UK Trade Info API")
+st.caption("Data: Companies House API, HMRC UK Trade Info (CSV upload)")
