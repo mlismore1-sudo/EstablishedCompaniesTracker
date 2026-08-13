@@ -7,7 +7,6 @@ import time
 import pandas as pd
 
 # Configuration - Only 1 API key needed (Companies House)
-# UK Trade Info API is open access - no key required!
 COMPANIES_HOUSE_API_KEY = os.getenv("COMPANIES_HOUSE_API_KEY")
 
 # API Base URLs
@@ -77,10 +76,6 @@ def search_companies_by_sic(
     company_status: str = "active",
     size: int = 100
 ) -> List[Dict]:
-    """
-    Search Companies House by SIC code and incorporation date
-    FREE API - 600 requests per 5 minutes
-    """
     session = get_ch_session()
     
     params = {
@@ -100,7 +95,6 @@ def search_companies_by_sic(
         )
         response.raise_for_status()
         
-        # Check rate limit
         remaining = response.headers.get("X-Ratelimit-Remain", "unknown")
         st.caption(f"Companies House API: {remaining} requests remaining")
         
@@ -113,12 +107,11 @@ def check_uk_trade_importer_api(company_name: str, postcode: str = None) -> bool
     """
     Check if company appears as importer via UK Trade Info API
     OPEN ACCESS - No API key required!
-    Rate limit: 60 requests per minute
-    
-    API Documentation: https://www.uktradeinfo.com/api-documentation
     """
+    if not company_name or not isinstance(company_name, str):
+        return False
+    
     session = requests.Session()
-    # NO authentication needed - API is open access
     
     # OData filter: search by company name
     company_name_clean = company_name.upper().replace(" LIMITED", "").replace(" LTD", "")
@@ -156,7 +149,6 @@ def check_uk_trade_importer_api(company_name: str, postcode: str = None) -> bool
     return False
 
 def get_company_profile_ch(company_number: str) -> Optional[Dict]:
-    """Get full company profile from Companies House"""
     session = get_ch_session()
     
     try:
@@ -179,19 +171,13 @@ if start_search:
     
     if not COMPANIES_HOUSE_API_KEY:
         st.error("Companies House API key not set")
-        st.info("""
-        **Get your FREE API key:**
-        1. Go to https://developer.company-information.service.gov.uk/
-        2. Register for free account
-        3. Generate API key
-        4. Add to Streamlit Secrets as `COMPANIES_HOUSE_API_KEY`
-        """)
+        st.info("Add COMPANIES_HOUSE_API_KEY to Streamlit Secrets")
         st.stop()
     
-    # Step 1: Search Companies House by SIC and incorporation date
+    # Step 1: Search Companies House
     st.subheader("Step 1: Searching Companies House")
     
-    with st.spinner(f"Searching for SIC {sic_code}, incorporated {incorporation_from.year}-{incorporation_to.year}..."):
+    with st.spinner(f"Searching for SIC {sic_code}..."):
         companies = search_companies_by_sic(
             sic_code=sic_code,
             incorporation_from=incorporation_from.strftime("%Y-%m-%d"),
@@ -204,12 +190,12 @@ if start_search:
         st.warning("No companies found. Try adjusting your filters.")
         st.stop()
     
-    st.success(f"Found {len(companies)} companies with SIC code {sic_code}")
+    st.success(f"Found {len(companies)} companies")
     
     # Step 2: Check UK Trade importer status
     if check_importer:
-        st.subheader("Step 2: Verifying UK Trade Importer Status")
-        st.info("Using UK Trade Info API (open access - no API key required)")
+        st.subheader("Step 2: Checking Importer Status")
+        st.info("Using UK Trade Info API (open access - no API key needed)")
         
         importer_filtered = []
         progress_bar = st.progress(0)
@@ -219,17 +205,18 @@ if start_search:
             company_number = company.get("company_number")
             company_name = company.get("title")
             
+            # Skip if no company name
+            if not company_name:
+                continue
+            
             status_text.text(f"Checking {i+1}/{len(companies)}: {company_name}")
             
-            # Get full profile for postcode
             profile = get_company_profile_ch(company_number)
             
             if profile:
-                # Get postcode from registered office
                 address = profile.get("registered_office_address", {})
                 postcode = address.get("postal_code", "")
                 
-                # Check importer status (no API key needed!)
                 is_importer = check_uk_trade_importer_api(company_name, postcode)
                 
                 if is_importer:
@@ -240,7 +227,7 @@ if start_search:
                     })
             
             progress_bar.progress((i + 1) / len(companies))
-            time.sleep(0.1)  # Rate limiting
+            time.sleep(0.1)
         
         progress_bar.empty()
         status_text.empty()
@@ -248,7 +235,6 @@ if start_search:
         st.success(f"{len(final_companies)} companies are confirmed importers")
     
     else:
-        # No importer check - just get profiles for all companies
         st.subheader("Step 2: Fetching Company Details")
         
         final_companies = []
@@ -277,7 +263,6 @@ if start_search:
     if final_companies:
         st.subheader("Results")
         
-        # Prepare data for display
         results_data = []
         for company_data in final_companies:
             profile = company_data["profile"]
@@ -292,7 +277,6 @@ if start_search:
         
         df = pd.DataFrame(results_data)
         
-        # Download button
         csv = df.to_csv(index=False)
         st.download_button(
             label="Download Results (CSV)",
@@ -301,10 +285,8 @@ if start_search:
             mime="text/csv"
         )
         
-        # Display table
         st.dataframe(df, use_container_width=True)
         
-        # Detailed view
         if len(df) > 0:
             selected = st.selectbox("View company details", df["Company Name"].tolist())
             if selected:
@@ -324,75 +306,37 @@ if start_search:
         st.warning("No companies matched all criteria.")
 
 # Info Section
-with st.expander("API Setup Instructions"):
+with st.expander("Setup Instructions"):
     st.markdown("""
-    ### Required API Key (Only 1!)
+    ### API Keys Required
     
-    #### Companies House API (Unlimited Free)
+    **Only 1 API key needed:**
     
-    **Register:** https://developer.company-information.service.gov.uk/
+    #### Companies House API (FREE)
     
-    **Rate Limit:** 600 requests per 5 minutes
+    1. Go to https://developer.company-information.service.gov.uk/
+    2. Register for free
+    3. Generate API key
+    4. Add to Streamlit Secrets:
     
-    **Setup in Streamlit Secrets:**
     ```toml
-    COMPANIES_HOUSE_API_KEY = "your_api_key_here"
+    COMPANIES_HOUSE_API_KEY = "your_key_here"
     ```
     
-    ---
+    #### UK Trade Info API (OPEN ACCESS)
     
-    #### UK Trade Info API (Open Access - No Key Needed!)
+    **No API key needed!** This API is completely open access.
     
-    **Base URL:** https://api.uktradeinfo.com
-    
-    **Documentation:** https://www.uktradeinfo.com/api-documentation
-    
-    **Rate Limit:** 60 requests per minute
-    
-    **No authentication required** - the API is completely open access!
-    
-    ---
-    
-    ### Cost Breakdown
-    
-    **Total: GBP 0.00** (completely free, unlimited)
-    
-    - Companies House: FREE (unlimited)
-    - UK Trade Info: FREE (open access, no key needed)
+    Documentation: https://www.uktradeinfo.com/api-documentation
     
     ---
     
     ### Rate Limits
     
-    | API | Limit | Reset |
-    |-----|-------|-------|
-    | Companies House | 600 req | 5 minutes |
-    | UK Trade Info | 60 req | 1 minute |
-    
-    ---
-    
-    ### What This App Does
-    
-    1. Searches Companies House for companies matching your SIC code
-    2. Filters by incorporation date range (2000-2022)
-    3. Filters by company status (active)
-    4. Optionally checks if company appears as importer in HMRC data
-    5. Returns list of matching companies with download option
-    
-    **Note:** This version does NOT filter by revenue. All companies with the specified SIC code will be included regardless of turnover.
-    
-    ---
-    
-    ### Common SIC Codes
-    
-    - **46900**: Non-specialised wholesale trade
-    - **47110**: Retail sale in non-specialised stores (food, beverages, tobacco)
-    - **62012**: Business and domestic software development
-    - **68100**: Buying and selling of own real estate
-    - **70100**: Activities of head offices
-    - **74909**: Other professional activities n.e.c.
+    - Companies House: 600 requests per 5 minutes
+    - UK Trade Info: 60 requests per minute
     """)
 
 # Footer
 st.divider()
-st.caption("Data sources: Companies House API, HMRC UK Trade Info API (open access)")
+st.caption("Data: Companies House API, HMRC UK Trade Info API")
