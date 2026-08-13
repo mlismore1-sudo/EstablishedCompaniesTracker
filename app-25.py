@@ -17,7 +17,7 @@ IXBRL_BASE = "https://convert-ixbrl.co.uk/api"
 UK_TRADE_BASE = "https://api.uktradeinfo.com"
 
 st.set_page_config(page_title="UK Company Screener (Free)", layout="wide")
-st.title("🇬🇧 UK Company Screener - 100% Free APIs")
+st.title("UK Company Screener - 100% Free APIs")
 st.markdown("No paid APIs, no CSV files - all screening via free APIs")
 
 # Sidebar
@@ -31,7 +31,7 @@ with st.sidebar:
         help="Standard Industrial Classification code"
     )
     
-    st.info("💷 Revenue: £5m - £30m (via Convert-IXBRL free API)")
+    st.info("Revenue: GBP 5m-30m (via Convert-IXBRL free API)")
     
     incorporation_from = st.date_input(
         "Incorporated From",
@@ -50,7 +50,7 @@ with st.sidebar:
     )
     
     check_importer = st.checkbox(
-        "✓ Must be UK Trade importer",
+        "Must be UK Trade importer",
         value=True,
         help="Cross-reference against HMRC importer database"
     )
@@ -63,7 +63,7 @@ with st.sidebar:
         help="Convert-IXBRL gives 25 free credits. Each company check costs 1 credit."
     )
     
-    start_search = st.button("🔍 Start Search", type="primary")
+    start_search = st.button("Start Search", type="primary")
 
 # Helper Functions
 def get_ch_session():
@@ -143,7 +143,7 @@ def get_company_financials_ixbrl(company_number: str) -> Optional[Dict]:
 
 def check_revenue_range(financials: Dict, min_revenue: int = 5_000_000, max_revenue: int = 30_000_000) -> bool:
     """
-    Check if company turnover is within £5m-€30m range
+    Check if company turnover is within GBP 5m-30m range
     Uses Convert-IXBRL financial data
     """
     if not financials:
@@ -192,7 +192,7 @@ def check_uk_trade_importer_api(company_name: str, postcode: str = None) -> bool
     Docs: https://www.uktradeinfo.com/api-documentation
     """
     if not UK_TRADE_API_KEY:
-        st.warning("⚠️ UK Trade API key not set. Skipping importer check.")
+        st.warning("UK Trade API key not set. Skipping importer check.")
         return True  # Skip check if no API key
     
     session = requests.Session()
@@ -226,11 +226,11 @@ def check_uk_trade_importer_api(company_name: str, postcode: str = None) -> bool
                 import_entries = trader.get("ImportEntries", 0)
                 
                 if import_entries > 0:
-                    st.success(f"✓ {company_name} confirmed as importer ({import_entries} import entries)")
+                    st.success(f"Confirmed as importer ({import_entries} import entries)")
                     return True
             
             if traders:
-                st.info(f"ℹ️ {company_name} found but no import activity (only exports)")
+                st.info(f"Found but no import activity (only exports)")
             
     except requests.exceptions.RequestException as e:
         st.warning(f"UK Trade API error: {e}")
@@ -260,7 +260,7 @@ if start_search:
         st.stop()
     
     if not COMPANIES_HOUSE_API_KEY:
-        st.error("⚠️ Companies House API key not set")
+        st.error("Companies House API key not set")
         st.info("""
         **Get your FREE API key:**
         1. Go to https://developer.company-information.service.gov.uk/
@@ -271,7 +271,7 @@ if start_search:
         st.stop()
     
     if not CONVERT_IXBRL_API_KEY:
-        st.error("⚠️ Convert-IXBRL API key not set")
+        st.error("Convert-IXBRL API key not set")
         st.info("""
         **Get your FREE API key (25 credits):**
         1. Go to https://convert-ixbrl.co.uk/
@@ -284,7 +284,7 @@ if start_search:
         st.stop()
     
     # Step 1: Search Companies House by SIC and incorporation date
-    st.subheader("📊 Step 1: Searching Companies House")
+    st.subheader("Step 1: Searching Companies House")
     
     with st.spinner(f"Searching for SIC {sic_code}, incorporated {incorporation_from.year}-{incorporation_to.year}..."):
         companies = search_companies_by_sic(
@@ -300,9 +300,9 @@ if start_search:
     
     st.success(f"Found {len(companies)} companies. Processing financials...")
     
-    # Step 2: Filter by revenue (£5m-€30m) and FX exposure
-    st.subheader("💷 Step 2: Filtering by Revenue & FX Exposure")
-    st.info(f"⚠️ This will use {min(len(companies), max_results)} Convert-IXBRL credits (1 per company)")
+    # Step 2: Filter by revenue (GBP 5m-30m) and FX exposure
+    st.subheader("Step 2: Filtering by Revenue & FX Exposure")
+    st.info(f"This will use {min(len(companies), max_results)} Convert-IXBRL credits (1 per company)")
     
     filtered_companies = []
     progress_bar = st.progress(0)
@@ -346,7 +346,7 @@ if start_search:
     progress_bar.empty()
     status_text.empty()
     
-    st.success(f"✅ {len(filtered_companies)} companies match revenue + FX criteria (used {credits_used} credits)")
+    st.success(f"{len(filtered_companies)} companies match revenue + FX criteria (used {credits_used} credits)")
     
     if not filtered_companies:
         st.warning("No companies matched revenue and FX criteria.")
@@ -361,7 +361,7 @@ if start_search:
     
     # Step 3: Check UK Trade importer status
     if check_importer:
-        st.subheader("🚢 Step 3: Verifying UK Trade Importer Status")
+        st.subheader("Step 3: Verifying UK Trade Importer Status")
         
         importer_filtered = []
         progress_bar = st.progress(0)
@@ -385,14 +385,14 @@ if start_search:
         
         progress_bar.empty()
         final_companies = importer_filtered
-        st.success(f"✅ {len(final_companies)} companies match ALL criteria")
+        st.success(f"{len(final_companies)} companies match ALL criteria")
     
     else:
         final_companies = filtered_companies
     
     # Display Results
     if final_companies:
-        st.subheader("📋 Results")
+        st.subheader("Results")
         
         # Prepare data for display
         results_data = []
@@ -406,7 +406,7 @@ if start_search:
                 company_financials = financials.get("company_financial_list", [])
                 if company_financials:
                     turnover_str = company_financials[0].get("profit_loss", {}).get("turnover", "0")
-                    turnover = f"€{float(turnover_str.replace(',', '')):,.0f}"
+                    turnover = f"GBP {float(turnover_str.replace(',', '')):,.0f}"
             except:
                 pass
             
@@ -424,7 +424,7 @@ if start_search:
         # Download button
         csv = df.to_csv(index=False)
         st.download_button(
-            "📥 Download Results (CSV)",
+            "Download Results (CSV)",
             csv,
             file_name=f"uk_companies_free_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
             mime="text/csv"
@@ -464,7 +464,7 @@ if start_search:
         st.warning("No companies matched all criteria.")
 
 # Info Section
-with st.expander("ℹ️ Free API Setup Instructions"):
+with st.expander("Free API Setup Instructions"):
     st.markdown("""
     ### 1. Companies House API (FREE, Unlimited)
     
@@ -524,11 +524,11 @@ with st.expander("ℹ️ Free API Setup Instructions"):
     - Convert-IXBRL: **FREE** (uses 25 of your welcome credits)
     - UK Trade Info: **FREE** (unlimited on free tier)
     
-    **Total: £0.00** (for first 25 companies)
+    **Total: GBP 0.00** (for first 25 companies)
     
     After 25 companies:
     - Convert-IXBRL: ~3p per company
-    - Example: 100 companies = £3.00
+    - Example: 100 companies = GBP 3.00
     
     ---
     
@@ -557,5 +557,5 @@ with st.expander("ℹ️ Free API Setup Instructions"):
 if CONVERT_IXBRL_API_KEY:
     with st.sidebar:
         st.divider()
-        st.caption("ℹ️ Convert-IXBRL credits are consumed at 1 credit per company financial check.")
+        st.caption("Convert-IXBRL credits are consumed at 1 credit per company financial check.")
         st.caption("Free tier: 25 credits. Check your dashboard at https://convert-ixbrl.co.uk/myaccount")
